@@ -1,7 +1,6 @@
 from telegram import *
 from telegram.ext import *
-import sqlite3
-import os
+import sqlite3, os, datetime
 
 TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
@@ -11,111 +10,91 @@ cur = conn.cursor()
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS users(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tg_id INTEGER,
-    fullname TEXT,
-    phone TEXT,
-    passport TEXT,
-    room INTEGER,
-    status TEXT
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ tg_id INTEGER,
+ fullname TEXT,
+ phone TEXT,
+ passport TEXT,
+ room INTEGER,
+ days INTEGER,
+ total INTEGER,
+ end_date TEXT
 )
 """)
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS settings(
-    id INTEGER PRIMARY KEY,
-    card TEXT
+ id INTEGER PRIMARY KEY,
+ card TEXT
 )
 """)
-
 cur.execute("INSERT OR IGNORE INTO settings VALUES (1,'8600 XXXX XXXX XXXX')")
 conn.commit()
 
-def rooms_kb():
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(f"Xona {i}", callback_data=f"room_{i}")]
-         for i in range(1, 25)]
-    )
+def rooms():
+ return InlineKeyboardMarkup([[InlineKeyboardButton(f"Xona {i}",callback_data=f"room_{i}")] for i in range(1,25)])
 
-def admin_check_kb():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Tasdiqlash", callback_data="ok"),
-            InlineKeyboardButton("❌ Soxta", callback_data="fake")
-        ]
-    ])
+def back():
+ return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Ortga",callback_data="back")]])
 
-async def start(update: Update, context):
-    context.user_data.clear()
-    await update.message.reply_text("🏨 Xonani tanlang (1–24):", reply_markup=rooms_kb())
+async def start(update:Update,context):
+ if update.effective_user.id==ADMIN_ID:
+  await update.message.reply_text("Admin panel",reply_markup=rooms())
+ else:
+  await update.message.reply_text("Bot faqat admin uchun")
 
-async def room(update: Update, context):
-    q = update.callback_query
-    await q.answer()
-    room = int(q.data.split("_")[1])
-    cur.execute("SELECT COUNT(*) FROM users WHERE room=?", (room,))
-    if cur.fetchone()[0] >= 6:
-        await q.message.reply_text("❌ Bu xona to‘la (6/6)")
-        return
-    context.user_data["room"] = room
-    await q.message.reply_text("👤 Ism Familiya Sharifingizni yozing:")
+async def admin_room(update:Update,context):
+ q=update.callback_query;await q.answer()
+ room=int(q.data.split("_")[1])
+ cur.execute("SELECT id,fullname FROM users WHERE room=?",(room,))
+ kb=[[InlineKeyboardButton(n,callback_data=f"user_{i}")] for i,n in cur.fetchall()]
+ kb.append([InlineKeyboardButton("⬅️ Ortga",callback_data="back")])
+ await q.message.reply_text(f"Xona {room}",reply_markup=InlineKeyboardMarkup(kb))
 
-async def text(update: Update, context):
-    if "fullname" not in context.user_data:
-        context.user_data["fullname"] = update.message.text
-        await update.message.reply_text("📞 Telefon raqamingizni yozing:")
-    elif "phone" not in context.user_data:
-        context.user_data["phone"] = update.message.text
-        await update.message.reply_text("🪪 Passport rasmini yuboring:")
+async def admin_user(update:Update,context):
+ q=update.callback_query;await q.answer()
+ uid=int(q.data.split("_")[1])
+ context.user_data["uid"]=uid
+ cur.execute("SELECT fullname,phone,days,total,end_date FROM users WHERE id=?",(uid,))
+ u=cur.fetchone()
+ await q.message.reply_text(
+ f"👤 {u[0]}\n📞 {u[1]}\n⏳ {u[2]} kun\n💰 {u[3]} so'm\n📅 {u[4]}",
+ reply_markup=InlineKeyboardMarkup([
+  [InlineKeyboardButton("➕ Kun qo‘shish",callback_data="add_days")],
+  [InlineKeyboardButton("⬅️ Ortga",callback_data="back")]
+ ]))
 
-async def passport(update: Update, context):
-    file_id = update.message.photo[-1].file_id
-    cur.execute("""
-    INSERT INTO users(tg_id, fullname, phone, passport, room, status)
-    VALUES(?,?,?,?,?,?)
-    """, (
-        update.effective_user.id,
-        context.user_data["fullname"],
-        context.user_data["phone"],
-        file_id,
-        context.user_data["room"],
-        "pending"
-    ))
-    conn.commit()
+async def add_days(update:Update,context):
+ q=update.callback_query;await q.answer()
+ context.user_data["add_days"]=True
+ await q.message.reply_text("Necha kun qo‘shamiz?")
 
-    await context.bot.send_photo(
-        ADMIN_ID,
-        file_id,
-        caption=f"🆕 YANGI REGISTRATSIYA\n👤 {context.user_data['fullname']}\n📞 {context.user_data['phone']}\n🏨 Xona {context.user_data['room']}"
-    )
+async def text(update:Update,context):
+ if context.user_data.get("add_days"):
+  days=int(update.message.text)
+  uid=context.user_data["uid"]
+  if days<10: rate=50000
+  elif days<30: rate=40000
+  else: rate=1000000//30
+  total=days*rate
+  end=(datetime.date.today()+datetime.timedelta(days=days)).isoformat()
+  cur.execute("UPDATE users SET days=?,total=?,end_date=? WHERE id=?",(days,total,end,uid))
+  conn.commit()
+  await update.message.reply_text(f"💰 Hisob: {total} so'm\n📅 Tugash: {end}")
+  context.user_data.clear()
 
-    cur.execute("SELECT card FROM settings WHERE id=1")
-    card = cur.fetchone()[0]
-    await update.message.reply_text(f"💳 To‘lov kartasi:\n{card}\n\n📸 Chekni yuboring.")
+async def back_btn(update:Update,context):
+ await update.callback_query.answer()
+ await update.callback_query.message.reply_text("Admin panel",reply_markup=rooms())
 
-async def check(update: Update, context):
-    await context.bot.send_photo(
-        ADMIN_ID,
-        update.message.photo[-1].file_id,
-        caption="💰 TO‘LOV CHEKI",
-        reply_markup=admin_check_kb()
-    )
+app=ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("start",start))
+app.add_handler(CallbackQueryHandler(admin_room,pattern="room_"))
+app.add_handler(CallbackQueryHandler(admin_user,pattern="user_"))
+app.add_handler(CallbackQueryHandler(add_days,pattern="add_days"))
+app.add_handler(CallbackQueryHandler(back_btn,pattern="back"))
+app.add_handler(MessageHandler(filters.TEXT,text))
 
-async def admin_action(update: Update, context):
-    q = update.callback_query
-    await q.answer()
-    if q.data == "ok":
-        await q.message.reply_text("✅ To‘lov tasdiqlandi")
-    elif q.data == "fake":
-        await q.message.reply_text("❌ To‘lov soxta deb belgilandi")
-
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(room, pattern="room_"))
-app.add_handler(CallbackQueryHandler(admin_action))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text))
-app.add_handler(MessageHandler(filters.PHOTO, passport))
-app.add_handler(MessageHandler(filters.PHOTO, check))
-
-print("✅ Bot Render’da ishlayapti...")
+print("ADVANCED ADMIN BOT ISHLAYAPTI")
 app.run_polling()
+
